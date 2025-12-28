@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Chord to MIDI</title>
+
+    <style>
+        body {
+            font-family: system-ui;
+            padding: 20px;
+        }
+
+        input,
+        select,
+        button {
+            margin: 5px 0;
+            padding: 6px;
+        }
+
+        button {
+            cursor: pointer;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        #generatedChord {
+            font-weight: 600;
+            margin: 10px 0;
+        }
+
+        /* ---------- Piano ---------- */
+
+        #piano {
+            display: flex;
+            position: relative;
+            height: 80px;
+            margin-bottom: 15px;
+        }
+
+        .key {
+            position: relative;
+            border: 1px solid #999;
+            box-sizing: border-box;
+        }
+
+        .white {
+            width: 30px;
+            height: 80px;
+            background: #fff;
+        }
+
+        .black {
+            width: 18px;
+            height: 50px;
+            background: #000;
+            position: absolute;
+            top: 0;
+            left: 21px;
+            z-index: 2;
+        }
+
+        .key.active.white {
+            background: #8fd3f4;
+        }
+
+        .key.active.black {
+            background: #3b82f6;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h3>Chord → MIDI</h3>
+
+    <label>
+        Escribir acorde manualmente:
+        <input id="chordText" placeholder="Cm, F#7, Bbmaj7">
+    </label>
+
+    <hr>
+
+    <label>
+        O seleccionar acorde:
+        <select id="root">
+            <option>C</option>
+            <option>C#</option>
+            <option>Db</option>
+            <option>D</option>
+            <option>D#</option>
+            <option>Eb</option>
+            <option>E</option>
+            <option>F</option>
+            <option>F#</option>
+            <option>Gb</option>
+            <option>G</option>
+            <option>G#</option>
+            <option>Ab</option>
+            <option>A</option>
+            <option>A#</option>
+            <option>Bb</option>
+            <option>B</option>
+        </select>
+    </label>
+
+    <label>
+        Type:
+        <select id="type">
+            <option value="maj">Major</option>
+            <option value="m">Minor</option>
+            <option value="7">7</option>
+            <option value="maj7">Maj7</option>
+            <option value="m7">m7</option>
+            <option value="dim">dim</option>
+            <option value="aug">aug</option>
+            <option value="sus2">sus2</option>
+            <option value="sus4">sus4</option>
+        </select>
+    </label>
+
+    <hr>
+
+    <p id="generatedChord"></p>
+    <div id="piano"></div>
+
+    <button id="gen">Generate chord</button>
+    <button id="play" disabled>Play</button>
+    <button id="exportBtn" disabled>Export MIDI</button>
+
+    <script src="./libs/tone.js"></script>
+    <script src="./libs/midi.js"></script>
+
+    <script>
+        /* ---------- DATA ---------- */
+
+        const NOTE_MAP = {
+            C: 60, "C#": 61, Db: 61,
+            D: 62, "D#": 63, Eb: 63,
+            E: 64,
+            F: 65, "F#": 66, Gb: 66,
+            G: 67, "G#": 68, Ab: 68,
+            A: 69, "A#": 70, Bb: 70,
+            B: 71
+        };
+
+        const CHORDS = {
+            maj: [0, 4, 7],
+            m: [0, 3, 7],
+            "7": [0, 4, 7, 10],
+            maj7: [0, 4, 7, 11],
+            m7: [0, 3, 7, 10],
+            dim: [0, 3, 6],
+            aug: [0, 4, 8],
+            sus2: [0, 2, 7],
+            sus4: [0, 5, 7]
+        };
+
+        /* ---------- AUDIO ---------- */
+
+        const synth = new Tone.PolySynth(Tone.Synth).toDestination();
+        let lastNotes = null;
+        let lastChordName = "";
+
+        async function playChord(notes, duration = 0.6) {
+            await Tone.start();
+            const now = Tone.now();
+
+            notes.forEach(n => {
+                synth.triggerAttackRelease(
+                    Tone.Frequency(n, "midi"),
+                    duration,
+                    now
+                );
+            });
+        }
+
+        /* ---------- PIANO ---------- */
+
+        const PIANO_NOTES = [
+            { note: 60, type: "white" },
+            { note: 61, type: "black" },
+            { note: 62, type: "white" },
+            { note: 63, type: "black" },
+            { note: 64, type: "white" },
+            { note: 65, type: "white" },
+            { note: 66, type: "black" },
+            { note: 67, type: "white" },
+            { note: 68, type: "black" },
+            { note: 69, type: "white" },
+            { note: 70, type: "black" },
+            { note: 71, type: "white" }
+        ];
+
+        function buildPiano() {
+            piano.innerHTML = "";
+            PIANO_NOTES.forEach(n => {
+                const key = document.createElement("div");
+                key.className = `key ${n.type}`;
+                key.dataset.midi = n.note;
+
+                if (n.type === "white") {
+                    piano.appendChild(key);
+                } else {
+                    piano.lastElementChild.appendChild(key);
+                }
+            });
+        }
+
+        function highlightNotes(notes) {
+            document.querySelectorAll(".key").forEach(k =>
+                k.classList.remove("active")
+            );
+
+            notes.forEach(n => {
+                const key = document.querySelector(
+                    `.key[data-midi="${n}"]`
+                );
+                if (key) key.classList.add("active");
+            });
+        }
+
+        buildPiano();
+
+        /* ---------- LOGIC ---------- */
+
+        function parseChord(str) {
+            const m = str.match(/^([A-G])(#|b)?(.*)$/);
+            if (!m) return null;
+
+            let root = m[1] + (m[2] || "");
+            let type = m[3] || "maj";
+
+            if (type === "") type = "maj";
+            if (type === "min") type = "m";
+
+            return { root, type };
+        }
+
+        function chordToNotes({ root, type }, octave = 4) {
+            if (!NOTE_MAP[root] || !CHORDS[type]) return null;
+            const base = NOTE_MAP[root] + (octave - 4) * 12;
+            return CHORDS[type].map(i => base + i);
+        }
+
+        function exportMidi(notes, name) {
+            const midi = new Midi();
+            const track = midi.addTrack();
+
+            notes.forEach(n => {
+                track.addNote({
+                    midi: n,
+                    time: 0,
+                    duration: 0.1,
+                    velocity: 0.8
+                });
+            });
+
+            const bytes = midi.toArray();
+            const base64 = btoa(String.fromCharCode(...bytes));
+
+            const a = document.createElement("a");
+            a.href = "data:audio/midi;base64," + base64;
+            a.download = name + ".mid";
+            a.click();
+        }
+
+        /* ---------- EVENTS ---------- */
+
+        gen.onclick = () => {
+            let chord;
+            const txt = chordText.value.trim();
+
+            if (txt) {
+                chord = parseChord(txt);
+            } else {
+                chord = { root: root.value, type: type.value };
+            }
+
+            const notes = chord && chordToNotes(chord);
+            if (!notes) return alert("Invalid chord");
+
+            lastNotes = notes;
+            lastChordName = chord.root + chord.type;
+
+            generatedChord.textContent =
+                "Acorde generado: " + lastChordName;
+
+            highlightNotes(notes);
+            playChord(notes);
+
+            play.disabled = false;
+            exportBtn.disabled = false;
+        };
+
+        play.onclick = () => {
+            if (lastNotes) playChord(lastNotes);
+        };
+
+        exportBtn.onclick = () => {
+            if (lastNotes) exportMidi(lastNotes, lastChordName);
+        };
+    </script>
+
+</body>
+
+</html>
